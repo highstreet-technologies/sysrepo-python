@@ -19,9 +19,23 @@ from .errors import (
 from .subscription import Subscription
 from .util import c2str, is_async_func, str2c
 from .value import Value
-
+import threading
 
 LOG = logging.getLogger(__name__)
+
+
+def synchronized(lock_name):
+    
+    def decorator(method):
+			
+        def synced_method(self, *args, **kws):
+            lock = getattr(self, lock_name)
+            with lock:
+                return method(self, *args, **kws)
+                
+        return synced_method
+		
+    return decorator
 
 
 # ------------------------------------------------------------------------------
@@ -38,6 +52,7 @@ class SysrepoSession:
         "cdata",
         "is_implicit",
         "subscriptions",
+        "_srSessionLock"
     )
 
     # begin: general
@@ -51,6 +66,7 @@ class SysrepoSession:
         self.cdata = cdata
         self.is_implicit = implicit
         self.subscriptions = []
+        self._srSessionLock = threading.RLock()
 
     def __enter__(self) -> "SysrepoSession":
         return self
@@ -1499,6 +1515,83 @@ class SysrepoSession:
         finally:
             dnode.free()
 
+    @synchronized('_srSessionLock')
+    def set_item_sync(self, xpath:str, value:Any|None = None, datastore:str|List[str]|None = None):
+        """
+        Prepare to set (create) the value of a leaf, leaf-list, list, or presence
+        container. These changes are applied only after calling apply_changes().
+
+        :arg xpath:
+            Path identifier of the data element to be set.
+        :arg value:
+            Value to be set. It will be converted to string.
+        :arg datastore:
+            datastore to be filled
+        """
+         
+        if datastore is None:
+            self.set_item(xpath, value)
+        elif type(datastore) is str:
+            if datastore != self.get_datastore():
+                self.switch_datastore(datastore)
+            self.set_item(xpath, value)
+        else:
+            for ds in datastore:
+                self.switch_datastore(ds)
+                self.set_item(xpath, value) 
+    @synchronized('_srSessionLock')
+    def get_item_sync(self, xpath: str, timeout_ms: int = 0, datastore:str|None = None) -> Value:
+        """
+        Retrieve a single data element selected by the provided path.
+
+        :arg xpath:
+            Path of the data element to be retrieved.
+        :arg timeout_ms:
+            Operational callback timeout in milliseconds. If 0, default is used.
+        :arg datastore:
+            Datastore to read from
+        :returns:
+            A sysrepo.Value object.
+        :raises SysrepoInvalArgError:
+            If multiple nodes match the path.
+        :raises SysrepoNotFoundError:
+            If no nodes match the path.
+        """
+        if datastore is not None and datastore!=self.get_datastore():
+            self.switch_datastore(datastore)  
+        return self.get_item(xpath, timeout_ms)
+    
+    @synchronized('_srSessionLock')
+    def get_items_sync(self, xpath: str, timeout_ms: int = 0, no_state: bool = False, no_config: bool = False, no_subs: bool = False, no_stored: bool = False, datastore:str|None = None) -> Iterator[Value]:
+        """
+        Retrieve an array of data elements selected by the provided XPath.
+
+        All data elements are transferred within one message from the datastore, which
+        is more efficient than multiple get_item calls.
+
+        :arg xpath:
+            XPath of the data elements to be retrieved.
+        :arg timeout_ms:
+            Operational callback timeout in milliseconds. If 0, default is used.
+        :arg no_state:
+            Return only configuration data.
+        :arg no_config:
+            Return only state data. If there are some state subtrees with configuration
+            these are also returned (with keys if lists).
+        :arg no_subs:
+            Return only stored operational data (push), do not call subscriber
+            callbacks (pull).
+        :arg no_stored:
+            Do not merge with stored operational data (push).
+        :arg datastore:
+            Datastore to read from
+        :returns:
+            An iterator that yields sysrepo.Value objects.
+        """
+        if datastore is not None and datastore!=self.get_datastore():
+            self.switch_datastore(datastore)  
+        return self.get_items(xpath, timeout_ms, no_state, no_config, no_subs, no_stored)
+    
 
 # -------------------------------------------------------------------------------------
 DATASTORE_VALUES = {
